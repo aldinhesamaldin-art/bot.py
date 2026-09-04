@@ -139,6 +139,20 @@ def admin_message_keyboard(user_id):
         [user_profile_button(user_id)]
     ])
 
+log_buffer = deque(maxlen=100)
+
+class BufferHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            log_buffer.append(msg)
+        except Exception:
+            pass
+
+buffer_handler = BufferHandler()
+buffer_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+logger.addHandler(buffer_handler)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
@@ -199,8 +213,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     admin_text = f"پیام جدید از کاربر\n\n{mention}\nزمان دریافت: {received_time}\n\n{html.escape(text)}"
     try:
         await context.bot.send_message(chat_id=ADMIN_USER_ID, text=admin_text, parse_mode=ParseMode.HTML, reply_markup=admin_message_keyboard(user.id))
+        await update.message.reply_text("پیام شما دریافت شد. منتظر پاسخ باشید.")
     except Exception as e:
         logger.exception("Could not send user message to admin: %s", e)
+        await update.message.reply_text("خطا در ارسال پیام. لطفاً دوباره تلاش کنید.")
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -282,17 +298,31 @@ async def cpu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"وضعیت سرور\n\nCPU: <code>{cpu_percent}%</code>\nهسته‌ها: <code>{cpu_count}</code>\nفرکانس: <code>{freq_text}</code>\n\nRAM: <code>{memory_percent}%</code>\nدیسک: <code>{disk_percent}%</code>\n\nآپتایم: <code>{uptime_hours:.1f} ساعت</code>"
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+async def log_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    if not log_buffer:
+        await update.message.reply_text("لاگی ثبت نشده.")
+        return
+    lines = list(log_buffer)[-10:]
+    log_text = "\n".join(lines)
+    await update.message.reply_text(f"```\n{log_text}\n```", parse_mode=ParseMode.MARKDOWN_V2)
+
 async def remote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         return
-    if not context.args:
-        await update.message.reply_text("استفاده:\n/remote [کد پایتون]\n\nمثال:\n/remote print('hello')")
+    if not update.message.reply_to_message:
+        await update.message.reply_text("روی پیام حاوی کد ریپلای کن و /remote بزن.")
         return
-    code = " ".join(context.args)
-    if code.startswith("```") and code.endswith("```"):
-        code = code[3:-3]
-        if code.startswith("python"):
-            code = code[6:]
+    replied = update.message.reply_to_message
+    code = replied.text or ""
+    if not code:
+        await update.message.reply_text("پیام ریپلای شده متن ندارد.")
+        return
+    code = code.strip()
+    if code.startswith("```"):
+        code = re.sub(r"^```[a-zA-Z]*\n?", "", code)
+        code = re.sub(r"\n?```$", "", code)
     stdout = io.StringIO()
     stderr = io.StringIO()
     try:
@@ -306,6 +336,12 @@ async def remote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'psutil': psutil,
                 'time': time,
                 'datetime': datetime,
+                'asyncio': asyncio,
+                'os': os,
+                'html': html,
+                're': re,
+                'logger': logger,
+                'log_buffer': log_buffer,
             }
             start_time = time.perf_counter()
             exec(code, exec_globals)
@@ -314,15 +350,15 @@ async def remote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         error_output = stderr.getvalue()
         execution_time = (end_time - start_time) * 1000
         if output:
-            result_text = f"خروجی:\n<code>{html.escape(output[:3000])}</code>\n\nزمان اجرا: {execution_time:.2f}ms"
+            result_text = f"خروجی:\n```\n{output[:3000]}\n```\nزمان اجرا: {execution_time:.2f}ms"
         elif error_output:
-            result_text = f"خطا:\n<code>{html.escape(error_output[:3000])}</code>"
+            result_text = f"خطا:\n```\n{error_output[:3000]}\n```"
         else:
             result_text = f"کد اجرا شد.\nزمان اجرا: {execution_time:.2f}ms"
     except Exception as e:
         error_details = traceback.format_exc()
-        result_text = f"خطا در اجرا:\n<code>{html.escape(str(e))}</code>\n\n<code>{html.escape(error_details[:2000])}</code>"
-    await update.message.reply_text(result_text, parse_mode=ParseMode.HTML)
+        result_text = f"خطا در اجرا:\n```\n{str(e)}\n\n{error_details[:2000]}\n```"
+    await update.message.reply_text(result_text)
 
 async def remote_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -342,16 +378,23 @@ async def remote_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                     'context': context,
                     'db': db,
                     'ADMIN_USER_ID': ADMIN_USER_ID,
+                    'psutil': psutil,
+                    'time': time,
+                    'datetime': datetime,
+                    'asyncio': asyncio,
+                    'os': os,
+                    'html': html,
+                    're': re,
                 }
                 exec(code, exec_globals)
             output = stdout.getvalue()
             if output:
-                result_text = f"خروجی:\n<code>{html.escape(output[:3000])}</code>"
+                result_text = f"خروجی:\n```\n{output[:3000]}\n```"
             else:
                 result_text = "فایل اجرا شد."
         except Exception as e:
-            result_text = f"خطا:\n<code>{html.escape(str(e))}</code>"
-        await update.message.reply_text(result_text, parse_mode=ParseMode.HTML)
+            result_text = f"خطا:\n```\n{str(e)}\n```"
+        await update.message.reply_text(result_text)
 
 def admin_panel_keyboard():
     return InlineKeyboardMarkup([
@@ -360,6 +403,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("لیست کاربران", callback_data="panel:users")],
         [InlineKeyboardButton("پینگ", callback_data="panel:ping")],
         [InlineKeyboardButton("CPU", callback_data="panel:cpu")],
+        [InlineKeyboardButton("لاگ", callback_data="panel:log")],
         [InlineKeyboardButton("اجرای کد", callback_data="panel:remote")],
     ])
 
@@ -415,8 +459,15 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uptime_hours = uptime.total_seconds() / 3600
         text = f"وضعیت سرور\n\nCPU: <code>{cpu_percent}%</code>\nهسته‌ها: <code>{cpu_count}</code>\nفرکانس: <code>{freq_text}</code>\n\nRAM: <code>{memory_percent}%</code>\nدیسک: <code>{disk_percent}%</code>\n\nآپتایم: <code>{uptime_hours:.1f} ساعت</code>"
         await query.message.reply_text(text, parse_mode=ParseMode.HTML)
+    elif action == "log":
+        if not log_buffer:
+            await query.message.reply_text("لاگی ثبت نشده.")
+            return
+        lines = list(log_buffer)[-10:]
+        log_text = "\n".join(lines)
+        await query.message.reply_text(f"```\n{log_text}\n```", parse_mode=ParseMode.MARKDOWN_V2)
     elif action == "remote":
-        await query.message.reply_text("کد پایتون خود را ارسال کنید:\n\n/remote print('hello')")
+        await query.message.reply_text("کد پایتون را بفرست و روی آن /remote را ریپلای کن.")
 
 async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -490,6 +541,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CommandHandler("cpu", cpu_command))
+    application.add_handler(CommandHandler("log", log_command))
     application.add_handler(CommandHandler("remote", remote_command))
 
     application.add_handler(CallbackQueryHandler(user_button, pattern=r"^(user_send|user_reply|user_help)$"))
