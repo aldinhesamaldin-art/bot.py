@@ -29,6 +29,9 @@ SPAM_MESSAGE_LIMIT = 8
 SPAM_WINDOW_SECONDS = 3
 SPAM_COOLDOWN_SECONDS = 5
 
+DB_FILE = "bot_data.db"
+
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -36,12 +39,12 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-DB_FILE = "bot_data.db"
 
 db = sqlite3.connect(
     DB_FILE,
     check_same_thread=False
 )
+
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS users (
@@ -54,12 +57,14 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
+
 db.execute("""
 CREATE TABLE IF NOT EXISTS blocked_users (
     user_id INTEGER PRIMARY KEY,
     blocked_at TEXT
 )
 """)
+
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS messages (
@@ -71,6 +76,7 @@ CREATE TABLE IF NOT EXISTS messages (
 )
 """)
 
+
 db.execute("""
 CREATE TABLE IF NOT EXISTS admin_channels (
     chat_id INTEGER PRIMARY KEY,
@@ -78,6 +84,7 @@ CREATE TABLE IF NOT EXISTS admin_channels (
     added_at TEXT
 )
 """)
+
 
 db.commit()
 
@@ -337,10 +344,6 @@ def admin_message_keyboard(user_id):
 
 
 def get_message_text(message):
-    """
-    متن یا کپشن پیام را برمی‌گرداند.
-    """
-
     if message.text:
         return message.text
 
@@ -351,10 +354,6 @@ def get_message_text(message):
 
 
 def message_has_supported_content(message):
-    """
-    بررسی می‌کند پیام یکی از انواع مدیای قابل پشتیبانی باشد.
-    """
-
     return any([
         message.text,
         message.photo,
@@ -398,15 +397,47 @@ def check_rate_limit(user_id):
     return True
 
 
+# =========================================================
+# START
+# =========================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    user = update.effective_user
+
+    if not user:
+        return
+
+    if update.effective_chat.type != "private":
+        return
+
+    save_user(user)
+
+    if is_blocked(user.id):
+        await update.message.reply_text(
+            "شما بلاک هستید."
+        )
+        return
+
+    await update.message.reply_text(
+        "سلام 👋\n\n"
+        "پیامت رو ارسال کن تا برای مدیریت ارسال بشه.\n\n"
+        "متن، عکس، ویدئو، GIF، استیکر، فایل، ویس و صدا قابل ارسال است.",
+        reply_markup=user_keyboard()
+    )
+
+
+# =========================================================
+# SEND USER MESSAGE TO ADMIN
+# =========================================================
+
 async def send_message_to_admin(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     user
 ):
-    """
-    پیام کاربر را بدون دانلود و آپلود مجدد برای ادمین کپی می‌کند.
-    """
-
     message = update.message
 
     mention = user_mention(user)
@@ -418,7 +449,6 @@ async def send_message_to_admin(
         f"زمان دریافت: {received_time}"
     )
 
-    # پیام متنی
     if message.text:
 
         admin_text = (
@@ -435,7 +465,6 @@ async def send_message_to_admin(
 
         return
 
-    # مدیا + کپشن
     caption = message.caption or ""
 
     media_header = header
@@ -443,13 +472,9 @@ async def send_message_to_admin(
     if caption:
         media_header += (
             "\n\n"
-            f"کپشن:\n"
+            "کپشن:\n"
             f"{html.escape(caption)}"
         )
-
-    # برای مدیاهای دارای کپشن، کپشن اصلی حفظ می‌شود.
-    # هدر در یک پیام جداگانه ارسال می‌شود تا اطلاعات کاربر
-    # همیشه واضح باقی بماند.
 
     await context.bot.send_message(
         chat_id=ADMIN_USER_ID,
@@ -464,6 +489,10 @@ async def send_message_to_admin(
         message_id=message.message_id
     )
 
+
+# =========================================================
+# USER MESSAGE
+# =========================================================
 
 async def handle_user_message(
     update: Update,
@@ -545,6 +574,10 @@ async def handle_user_message(
         )
 
 
+# =========================================================
+# USER BUTTONS
+# =========================================================
+
 async def user_button(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -587,6 +620,10 @@ async def user_button(
         )
 
 
+# =========================================================
+# BOT ADDED TO CHANNEL / GROUP
+# =========================================================
+
 async def my_chat_member_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -608,6 +645,10 @@ async def my_chat_member_handler(
                 chat.title or "بدون عنوان"
             )
 
+
+# =========================================================
+# ADMIN CALLBACK
+# =========================================================
 
 async def admin_callback(
     update: Update,
@@ -755,6 +796,10 @@ async def admin_callback(
                 pass
 
 
+# =========================================================
+# ADMIN HELP
+# =========================================================
+
 def admin_panel_keyboard():
     return InlineKeyboardMarkup([
         [
@@ -791,6 +836,10 @@ async def admin_help(
         reply_markup=admin_panel_keyboard()
     )
 
+
+# =========================================================
+# ADMIN PANEL CALLBACK
+# =========================================================
 
 async def panel_callback(
     update: Update,
@@ -865,18 +914,17 @@ async def panel_callback(
         )
 
 
+# =========================================================
+# ADMIN REPLY
+# =========================================================
+
 async def send_admin_reply(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     target_user_id: int
 ):
-    """
-    هر نوع پیام ادمین را به کاربر ارسال می‌کند.
-    """
-
     message = update.message
 
-    # پیام متنی
     if message.text:
 
         await context.bot.send_message(
@@ -893,7 +941,6 @@ async def send_admin_reply(
 
         return
 
-    # مدیا
     await context.bot.copy_message(
         chat_id=target_user_id,
         from_chat_id=message.chat_id,
@@ -907,6 +954,10 @@ async def send_admin_reply(
         get_message_text(message)
     )
 
+
+# =========================================================
+# ADMIN MESSAGE
+# =========================================================
 
 async def handle_admin_message(
     update: Update,
@@ -926,35 +977,9 @@ async def handle_admin_message(
 
     text = message.text or ""
 
-    if text == "/button":
-
-        button_states[ADMIN_USER_ID] = {
-            "step": "text"
-        }
-
-        await message.reply_text(
-            "متن بنر را ارسال کنید."
-        )
-
-        return
-
-    if ADMIN_USER_ID in button_states:
-
-        await handle_button_flow(
-            update,
-            context
-        )
-
-        return
-
-    if text.lower() == "help":
-
-        await admin_help(
-            update,
-            context
-        )
-
-        return
+    # -----------------------------
+    # CANCEL
+    # -----------------------------
 
     if text == "/cancel":
 
@@ -983,57 +1008,10 @@ async def handle_admin_message(
 
         return
 
-    # پاسخ به کاربر با متن یا مدیا
-    if ADMIN_USER_ID in reply_targets:
+    # -----------------------------
+    # BROADCAST
+    # -----------------------------
 
-        target_user_id = reply_targets[
-            ADMIN_USER_ID
-        ]
-
-        if is_blocked(target_user_id):
-
-            await message.reply_text(
-                "این کاربر بلاک است."
-            )
-
-            reply_targets.pop(
-                ADMIN_USER_ID,
-                None
-            )
-
-            return
-
-        try:
-
-            await send_admin_reply(
-                update,
-                context,
-                target_user_id
-            )
-
-            await message.reply_text(
-                "پاسخ ارسال شد."
-            )
-
-            reply_targets.pop(
-                ADMIN_USER_ID,
-                None
-            )
-
-        except Exception as e:
-
-            logger.exception(
-                "Reply failed: %s",
-                e
-            )
-
-            await message.reply_text(
-                "ارسال پاسخ انجام نشد."
-            )
-
-        return
-
-    # ارسال همگانی فقط برای متن
     if ADMIN_USER_ID in broadcast_mode:
 
         broadcast_mode.discard(
@@ -1083,10 +1061,117 @@ async def handle_admin_message(
 
         return
 
+    # -----------------------------
+    # BUTTON
+    # -----------------------------
+
+    if text == "/button":
+
+        button_states[ADMIN_USER_ID] = {
+            "step": "text"
+        }
+
+        await message.reply_text(
+            "متن بنر را ارسال کنید."
+        )
+
+        return
+
+    # -----------------------------
+    # BUTTON FLOW
+    # -----------------------------
+
+    if ADMIN_USER_ID in button_states:
+
+        await handle_button_flow(
+            update,
+            context
+        )
+
+        return
+
+    # -----------------------------
+    # HELP
+    # -----------------------------
+
+    if text.lower() == "help":
+
+        await admin_help(
+            update,
+            context
+        )
+
+        return
+
+    # -----------------------------
+    # REPLY TO USER
+    # -----------------------------
+
+    if ADMIN_USER_ID in reply_targets:
+
+        target_user_id = reply_targets[
+            ADMIN_USER_ID
+        ]
+
+        if is_blocked(target_user_id):
+
+            await message.reply_text(
+                "این کاربر بلاک است."
+            )
+
+            reply_targets.pop(
+                ADMIN_USER_ID,
+                None
+            )
+
+            return
+
+        if not message_has_supported_content(message):
+
+            await message.reply_text(
+                "این نوع پیام پشتیبانی نمی‌شود."
+            )
+
+            return
+
+        try:
+
+            await send_admin_reply(
+                update,
+                context,
+                target_user_id
+            )
+
+            await message.reply_text(
+                "پاسخ ارسال شد."
+            )
+
+            reply_targets.pop(
+                ADMIN_USER_ID,
+                None
+            )
+
+        except Exception as e:
+
+            logger.exception(
+                "Reply failed: %s",
+                e
+            )
+
+            await message.reply_text(
+                "ارسال پاسخ انجام نشد."
+            )
+
+        return
+
     await message.reply_text(
         "برای مدیریت، help را ارسال کنید."
     )
 
+
+# =========================================================
+# BUTTON CREATOR
+# =========================================================
 
 async def handle_button_flow(
     update: Update,
@@ -1111,6 +1196,14 @@ async def handle_button_flow(
 
     if state["step"] == "text":
 
+        if not message.text:
+
+            await message.reply_text(
+                "متن بنر باید متنی باشد."
+            )
+
+            return
+
         state["text"] = message.text
         state["step"] = "buttons"
         state["buttons"] = []
@@ -1127,9 +1220,11 @@ async def handle_button_flow(
     elif state["step"] == "buttons":
 
         if not message.text:
+
             await message.reply_text(
                 "لطفاً متن دکمه‌ها را ارسال کنید."
             )
+
             return
 
         if message.text.lower() == "end":
@@ -1176,10 +1271,16 @@ async def handle_button_flow(
             else:
                 continue
 
+            btn_text = btn_text.strip()
+            btn_url = btn_url.strip()
+
+            if not btn_text or not btn_url:
+                continue
+
             row.append(
                 InlineKeyboardButton(
-                    btn_text.strip(),
-                    url=btn_url.strip()
+                    btn_text,
+                    url=btn_url
                 )
             )
 
@@ -1192,6 +1293,16 @@ async def handle_button_flow(
                 "ادامه بده یا end بزن."
             )
 
+        else:
+
+            await message.reply_text(
+                "فرمت دکمه صحیح نیست."
+            )
+
+
+# =========================================================
+# CHANNELS
+# =========================================================
 
 async def show_channels(
     update: Update,
@@ -1226,6 +1337,10 @@ async def show_channels(
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+
+# =========================================================
+# ADD CHANNEL
+# =========================================================
 
 async def add_channel_command(
     update: Update,
@@ -1271,6 +1386,10 @@ async def add_channel_command(
         f"کانال {title} با آیدی {chat_id} ذخیره شد."
     )
 
+
+# =========================================================
+# SEND BANNER
+# =========================================================
 
 async def send_banner_callback(
     update: Update,
@@ -1334,6 +1453,10 @@ async def send_banner_callback(
         )
 
 
+# =========================================================
+# ERROR HANDLER
+# =========================================================
+
 async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE
@@ -1343,6 +1466,10 @@ async def error_handler(
         exc_info=context.error
     )
 
+
+# =========================================================
+# HEALTH SERVER
+# =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
 
@@ -1369,14 +1496,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         return
 
 
-def start_health_server():
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            "10000"
-        )
-    )
+def start_health_server(port):
 
     server = HTTPServer(
         ("0.0.0.0", port),
@@ -1386,7 +1506,16 @@ def start_health_server():
     server.serve_forever()
 
 
+# =========================================================
+# MAIN
+# =========================================================
+
 def main():
+
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN environment variable is not set."
+        )
 
     port = int(
         os.environ.get(
@@ -1397,6 +1526,7 @@ def main():
 
     health_thread = threading.Thread(
         target=start_health_server,
+        args=(port,),
         daemon=True
     )
 
@@ -1408,6 +1538,7 @@ def main():
         .build()
     )
 
+    # /start
     application.add_handler(
         CommandHandler(
             "start",
@@ -1415,6 +1546,7 @@ def main():
         )
     )
 
+    # /addchannel
     application.add_handler(
         CommandHandler(
             "addchannel",
@@ -1422,6 +1554,7 @@ def main():
         )
     )
 
+    # دکمه‌های کاربر
     application.add_handler(
         CallbackQueryHandler(
             user_button,
@@ -1429,6 +1562,7 @@ def main():
         )
     )
 
+    # دکمه‌های مدیریت کاربر
     application.add_handler(
         CallbackQueryHandler(
             admin_callback,
@@ -1436,6 +1570,7 @@ def main():
         )
     )
 
+    # پنل مدیریت
     application.add_handler(
         CallbackQueryHandler(
             panel_callback,
@@ -1443,6 +1578,7 @@ def main():
         )
     )
 
+    # ارسال بنر
     application.add_handler(
         CallbackQueryHandler(
             send_banner_callback,
@@ -1450,6 +1586,7 @@ def main():
         )
     )
 
+    # تشخیص ادمین شدن ربات در کانال/سوپرگروه
     application.add_handler(
         ChatMemberHandler(
             my_chat_member_handler,
@@ -1457,8 +1594,7 @@ def main():
         )
     )
 
-    # تمام پیام‌های ادمین:
-    # متن، عکس، ویدئو، GIF، استیکر، فایل، ویس، صدا و...
+    # تمام پیام‌های ادمین
     application.add_handler(
         MessageHandler(
             filters.ALL
