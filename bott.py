@@ -4,11 +4,6 @@ import html
 import time
 import sqlite3
 import logging
-import psutil
-import asyncio
-import io
-import contextlib
-import traceback
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import defaultdict, deque
@@ -16,20 +11,38 @@ from datetime import datetime, timezone
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+    ChatMemberHandler,
+)
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_USER_ID = 190503955
 
 SPAM_MESSAGE_LIMIT = 8
-SPAM_WINDOW_SECONDS = 5
+SPAM_WINDOW_SECONDS = 3
 SPAM_COOLDOWN_SECONDS = 5
 
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
 logger = logging.getLogger(__name__)
 
 DB_FILE = "bot_data.db"
-db = sqlite3.connect(DB_FILE, check_same_thread=False)
+
+db = sqlite3.connect(
+    DB_FILE,
+    check_same_thread=False
+)
+
 db.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -40,12 +53,14 @@ CREATE TABLE IF NOT EXISTS users (
     last_seen TEXT
 )
 """)
+
 db.execute("""
 CREATE TABLE IF NOT EXISTS blocked_users (
     user_id INTEGER PRIMARY KEY,
     blocked_at TEXT
 )
 """)
+
 db.execute("""
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,507 +70,1430 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT
 )
 """)
+
+db.execute("""
+CREATE TABLE IF NOT EXISTS admin_channels (
+    chat_id INTEGER PRIMARY KEY,
+    title TEXT,
+    added_at TEXT
+)
+""")
+
 db.commit()
 
+
 user_message_times = defaultdict(deque)
+user_blocked_until = {}
+
 reply_targets = {}
 broadcast_mode = set()
 
+button_states = {}
+pending_banner = {}
+
+
 BAD_WORDS = {
-    "کص ننت", "کصت ننت", "کص کش", "کصکش", "مادر جنده", "مادرجنده", "مادر قحبه", "مادرقحبه",
-    "مادر کصته", "مادرکصته", "ننه جنده", "ننه قحبه", "ننه سگ", "ننه سگه", "ننه کصه",
-    "خواهر جنده", "خواهرجنده", "جنده", "قحبه", "مادرت", "ننت", "خواهرت",
-    "mother fucker", "motherfucker", "son of a bitch", "son of bitch",
+    "کص ننت",
+    "کصت ننت",
+    "کص کش",
+    "کصکش",
+    "مادر جنده",
+    "مادرجنده",
+    "مادر قحبه",
+    "مادرقحبه",
+    "مادر کصته",
+    "مادرکصته",
+    "ننه جنده",
+    "ننه قحبه",
+    "ننه سگ",
+    "ننه سگه",
+    "ننه کصه",
+    "خواهر جنده",
+    "خواهرجنده",
+    "جنده",
+    "قحبه",
+    "مادرت",
+    "ننت",
+    "خواهرت",
+    "mother fucker",
+    "motherfucker",
+    "son of a bitch",
+    "son of bitch",
 }
 
+
 def contains_profanity(text: str) -> bool:
+    if not text:
+        return False
+
     text = text.lower()
     normalized = re.sub(r"[\u200c\u200d]", " ", text)
+
     for word in BAD_WORDS:
         if word in normalized:
             return True
+
     return False
 
+
 def now():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+
 
 def save_user(user):
     if not user:
         return
+
     timestamp = now()
+
     db.execute("""
-    INSERT INTO users (user_id, first_name, last_name, username, joined_at, last_seen)
+    INSERT INTO users (
+        user_id,
+        first_name,
+        last_name,
+        username,
+        joined_at,
+        last_seen
+    )
     VALUES (?, ?, ?, ?, ?, ?)
+
     ON CONFLICT(user_id) DO UPDATE SET
         first_name=excluded.first_name,
         last_name=excluded.last_name,
         username=excluded.username,
         last_seen=excluded.last_seen
-    """, (user.id, user.first_name or "", user.last_name or "", user.username or "", timestamp, timestamp))
+    """, (
+        user.id,
+        user.first_name or "",
+        user.last_name or "",
+        user.username or "",
+        timestamp,
+        timestamp
+    ))
+
     db.commit()
+
 
 def is_blocked(user_id):
-    row = db.execute("SELECT 1 FROM blocked_users WHERE user_id=?", (user_id,)).fetchone()
+    row = db.execute(
+        "SELECT 1 FROM blocked_users WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
+
     return row is not None
 
+
 def block_user(user_id):
-    db.execute("INSERT OR IGNORE INTO blocked_users(user_id, blocked_at) VALUES (?, ?)", (user_id, now()))
+    db.execute(
+        "INSERT OR IGNORE INTO blocked_users(user_id, blocked_at) VALUES (?, ?)",
+        (user_id, now())
+    )
     db.commit()
+
 
 def unblock_user(user_id):
-    db.execute("DELETE FROM blocked_users WHERE user_id=?", (user_id,))
+    db.execute(
+        "DELETE FROM blocked_users WHERE user_id=?",
+        (user_id,)
+    )
     db.commit()
+
 
 def save_message(user_id, direction, text):
-    db.execute("INSERT INTO messages(user_id, direction, text, created_at) VALUES (?, ?, ?, ?)", (user_id, direction, text or "", now()))
+    db.execute("""
+    INSERT INTO messages (
+        user_id,
+        direction,
+        text,
+        created_at
+    )
+    VALUES (?, ?, ?, ?)
+    """, (
+        user_id,
+        direction,
+        text or "",
+        now()
+    ))
+
     db.commit()
 
+
+def save_channel(chat_id, title):
+    db.execute("""
+    INSERT INTO admin_channels (
+        chat_id,
+        title,
+        added_at
+    )
+    VALUES (?, ?, ?)
+
+    ON CONFLICT(chat_id) DO UPDATE SET
+        title=excluded.title
+    """, (
+        chat_id,
+        title,
+        now()
+    ))
+
+    db.commit()
+
+
+def get_channels():
+    return db.execute("""
+    SELECT chat_id, title
+    FROM admin_channels
+    ORDER BY added_at DESC
+    """).fetchall()
+
+
 def user_display_name(user):
-    name = " ".join(x for x in [user.first_name, user.last_name] if x).strip()
+    name = " ".join(
+        x for x in [user.first_name, user.last_name]
+        if x
+    ).strip()
+
     return name or "کاربر"
 
+
 def user_mention(user):
-    name = html.escape(user_display_name(user))
-    return f'<a href="tg://user?id={user.id}">{name}</a>'
+    name = html.escape(
+        user_display_name(user)
+    )
+
+    return (
+        f'<a href="tg://user?id={user.id}">'
+        f'{name}'
+        f'</a>'
+    )
+
 
 def user_profile_button(user_id):
-    return InlineKeyboardButton("پروفایل کاربر", url=f"tg://user?id={user_id}")
+    return InlineKeyboardButton(
+        "پروفایل کاربر",
+        url=f"tg://user?id={user_id}"
+    )
+
 
 def user_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("ارسال پیام", callback_data="user_send"), InlineKeyboardButton("راهنما", callback_data="user_help")]
+        [
+            InlineKeyboardButton(
+                "ارسال پیام",
+                callback_data="user_send"
+            ),
+            InlineKeyboardButton(
+                "راهنما",
+                callback_data="user_help"
+            )
+        ]
     ])
+
 
 def user_reply_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("پاسخ", callback_data="user_reply")]
+        [
+            InlineKeyboardButton(
+                "پاسخ",
+                callback_data="user_reply"
+            )
+        ]
     ])
+
 
 def admin_message_keyboard(user_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("پاسخ به کاربر", callback_data=f"reply:{user_id}")],
-        [InlineKeyboardButton("بلاک کردن", callback_data=f"block:{user_id}"), InlineKeyboardButton("آنبلاک", callback_data=f"unblock:{user_id}")],
-        [InlineKeyboardButton("حذف چت", callback_data=f"deletechat:{user_id}"), InlineKeyboardButton("بکاپ چت", callback_data=f"backup:{user_id}")],
-        [user_profile_button(user_id)]
+        [
+            InlineKeyboardButton(
+                "پاسخ به کاربر",
+                callback_data=f"reply:{user_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "بلاک کردن",
+                callback_data=f"block:{user_id}"
+            ),
+            InlineKeyboardButton(
+                "آنبلاک",
+                callback_data=f"unblock:{user_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "حذف چت",
+                callback_data=f"deletechat:{user_id}"
+            ),
+            InlineKeyboardButton(
+                "بکاپ چت",
+                callback_data=f"backup:{user_id}"
+            )
+        ],
+        [
+            user_profile_button(user_id)
+        ]
     ])
 
-log_buffer = deque(maxlen=100)
 
-class BufferHandler(logging.Handler):
-    def emit(self, record):
-        try:
-            msg = self.format(record)
-            log_buffer.append(msg)
-        except Exception:
-            pass
+def get_message_text(message):
+    """
+    متن یا کپشن پیام را برمی‌گرداند.
+    """
 
-buffer_handler = BufferHandler()
-buffer_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-logger.addHandler(buffer_handler)
+    if message.text:
+        return message.text
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
-        return
-    save_user(user)
-    if is_blocked(user.id):
-        await update.message.reply_text("شما بلاک شده‌اید.")
-        return
-    await update.message.reply_text(f"سلام {html.escape(user_display_name(user))}\n\nپیامت رو برای پشتیبانی ارسال کن.", reply_markup=user_keyboard())
+    if message.caption:
+        return message.caption
 
-async def user_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    if is_blocked(user_id):
-        return
-    if query.data == "user_send":
-        context.user_data["waiting_for_user_message"] = True
-        await query.message.reply_text("پیامت رو ارسال کن")
-    elif query.data == "user_reply":
-        context.user_data["waiting_for_user_message"] = True
-        await query.message.reply_text("پاسخت رو ارسال کن")
-    elif query.data == "user_help":
-        await query.message.reply_text("راهنما\n\nپیامت رو ارسال کن تا برای مدیریت ارسال بشه.")
+    return ""
+
+
+def message_has_supported_content(message):
+    """
+    بررسی می‌کند پیام یکی از انواع مدیای قابل پشتیبانی باشد.
+    """
+
+    return any([
+        message.text,
+        message.photo,
+        message.video,
+        message.animation,
+        message.document,
+        message.audio,
+        message.voice,
+        message.video_note,
+        message.sticker,
+    ])
+
 
 def check_rate_limit(user_id):
     current = time.monotonic()
+
+    if user_id in user_blocked_until:
+
+        if current < user_blocked_until[user_id]:
+            return False
+
+        del user_blocked_until[user_id]
+
     times = user_message_times[user_id]
+
     while times and current - times[0] > SPAM_WINDOW_SECONDS:
         times.popleft()
+
     if len(times) >= SPAM_MESSAGE_LIMIT:
+
+        user_blocked_until[user_id] = (
+            current + SPAM_COOLDOWN_SECONDS
+        )
+
+        times.clear()
+
         return False
+
     times.append(current)
+
     return True
 
-async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def send_message_to_admin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user
+):
+    """
+    پیام کاربر را بدون دانلود و آپلود مجدد برای ادمین کپی می‌کند.
+    """
+
+    message = update.message
+
+    mention = user_mention(user)
+    received_time = now()
+
+    header = (
+        "پیام جدید از کاربر\n\n"
+        f"{mention}\n"
+        f"زمان دریافت: {received_time}"
+    )
+
+    # پیام متنی
+    if message.text:
+
+        admin_text = (
+            f"{header}\n\n"
+            f"{html.escape(message.text)}"
+        )
+
+        await context.bot.send_message(
+            chat_id=ADMIN_USER_ID,
+            text=admin_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_message_keyboard(user.id)
+        )
+
+        return
+
+    # مدیا + کپشن
+    caption = message.caption or ""
+
+    media_header = header
+
+    if caption:
+        media_header += (
+            "\n\n"
+            f"کپشن:\n"
+            f"{html.escape(caption)}"
+        )
+
+    # برای مدیاهای دارای کپشن، کپشن اصلی حفظ می‌شود.
+    # هدر در یک پیام جداگانه ارسال می‌شود تا اطلاعات کاربر
+    # همیشه واضح باقی بماند.
+
+    await context.bot.send_message(
+        chat_id=ADMIN_USER_ID,
+        text=media_header,
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_message_keyboard(user.id)
+    )
+
+    await context.bot.copy_message(
+        chat_id=ADMIN_USER_ID,
+        from_chat_id=message.chat_id,
+        message_id=message.message_id
+    )
+
+
+async def handle_user_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     user = update.effective_user
     message = update.message
+
     if not user or not message:
         return
+
+    if update.effective_chat.type != "private":
+        return
+
     save_user(user)
+
     if is_blocked(user.id):
+
         try:
             await message.delete()
         except Exception:
             pass
-        return
-    if not check_rate_limit(user.id):
-        await message.reply_text("لطفاً 5 ثانیه دیگر دوباره تلاش کنید.")
-        return
-    text = message.text or ""
-    if contains_profanity(text):
-        await message.reply_text("پیام شما به دلیل توهین ارسال نشد.")
-        return
-    save_message(user.id, "user", text)
-    mention = user_mention(user)
-    received_time = now()
-    admin_text = f"پیام جدید از کاربر\n\n{mention}\nزمان دریافت: {received_time}\n\n{html.escape(text)}"
-    try:
-        await context.bot.send_message(chat_id=ADMIN_USER_ID, text=admin_text, parse_mode=ParseMode.HTML, reply_markup=admin_message_keyboard(user.id))
-        await update.message.reply_text("پیام شما دریافت شد. منتظر پاسخ باشید.")
-    except Exception as e:
-        logger.exception("Could not send user message to admin: %s", e)
-        await update.message.reply_text("خطا در ارسال پیام. لطفاً دوباره تلاش کنید.")
 
-async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.from_user.id != ADMIN_USER_ID:
-        await query.answer("دسترسی ندارید.", show_alert=True)
         return
-    await query.answer()
-    data = query.data
+
+    if not check_rate_limit(user.id):
+
+        await message.reply_text(
+            f"لطفاً {SPAM_COOLDOWN_SECONDS} ثانیه دیگر دوباره تلاش کنید."
+        )
+
+        return
+
+    if not message_has_supported_content(message):
+
+        await message.reply_text(
+            "این نوع پیام پشتیبانی نمی‌شود."
+        )
+
+        return
+
+    text = get_message_text(message)
+
+    if text and contains_profanity(text):
+
+        await message.reply_text(
+            "پیام شما به دلیل توهین ارسال نشد."
+        )
+
+        return
+
+    save_message(
+        user.id,
+        "user",
+        text
+    )
+
     try:
-        action, raw_user_id = data.split(":", 1)
+
+        await send_message_to_admin(
+            update,
+            context,
+            user
+        )
+
+        await message.reply_text(
+            "پیام شما دریافت شد. منتظر پاسخ باشید."
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            "Could not send user message to admin: %s",
+            e
+        )
+
+        await message.reply_text(
+            "خطا در ارسال پیام. لطفاً دوباره تلاش کنید."
+        )
+
+
+async def user_button(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+
+    await query.answer()
+
+    user_id = query.from_user.id
+
+    if is_blocked(user_id):
+        return
+
+    if query.data == "user_send":
+
+        context.user_data[
+            "waiting_for_user_message"
+        ] = True
+
+        await query.message.reply_text(
+            "پیامت رو ارسال کن.\n"
+            "متن، عکس، ویدئو، GIF، استیکر، فایل، ویس و صدا قابل ارسال است."
+        )
+
+    elif query.data == "user_reply":
+
+        context.user_data[
+            "waiting_for_user_message"
+        ] = True
+
+        await query.message.reply_text(
+            "پاسخت رو ارسال کن."
+        )
+
+    elif query.data == "user_help":
+
+        await query.message.reply_text(
+            "راهنما\n\n"
+            "پیامت رو ارسال کن تا برای مدیریت ارسال بشه."
+        )
+
+
+async def my_chat_member_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    chat_member = update.my_chat_member
+
+    if not chat_member:
+        return
+
+    chat = chat_member.chat
+    new_status = chat_member.new_chat_member.status
+
+    if chat.type in ["channel", "supergroup"]:
+
+        if new_status in ["administrator", "creator"]:
+
+            save_channel(
+                chat.id,
+                chat.title or "بدون عنوان"
+            )
+
+
+async def admin_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+
+    if query.from_user.id != ADMIN_USER_ID:
+
+        await query.answer(
+            "دسترسی ندارید.",
+            show_alert=True
+        )
+
+        return
+
+    await query.answer()
+
+    data = query.data
+
+    try:
+
+        action, raw_user_id = data.split(
+            ":",
+            1
+        )
+
         user_id = int(raw_user_id)
+
     except Exception:
         return
+
     if action == "reply":
+
         reply_targets[ADMIN_USER_ID] = user_id
-        await query.message.reply_text("پاسخ به کاربر را ارسال کنید.")
+
+        await query.message.reply_text(
+            "پاسخ به کاربر را ارسال کنید.\n"
+            "متن، عکس، ویدئو، GIF، استیکر، فایل، ویس و صدا قابل ارسال است."
+        )
+
     elif action == "block":
+
         block_user(user_id)
-        await query.message.reply_text("کاربر بلاک شد.")
+
+        await query.message.reply_text(
+            "کاربر بلاک شد."
+        )
+
         try:
-            await context.bot.send_message(chat_id=user_id, text="شما بلاک شدید.")
+
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="شما بلاک شدید."
+            )
+
         except Exception:
             pass
+
     elif action == "unblock":
+
         unblock_user(user_id)
-        await query.message.reply_text("کاربر آنبلاک شد.")
+
+        await query.message.reply_text(
+            "کاربر آنبلاک شد."
+        )
+
     elif action == "deletechat":
-        db.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
+
+        db.execute(
+            "DELETE FROM messages WHERE user_id=?",
+            (user_id,)
+        )
+
         db.commit()
-        await query.message.reply_text("اطلاعات ذخیره‌شده چت حذف شد.")
+
+        await query.message.reply_text(
+            "اطلاعات ذخیره‌شده چت حذف شد."
+        )
+
     elif action == "backup":
-        rows = db.execute("SELECT direction, text, created_at FROM messages WHERE user_id=? ORDER BY id ASC", (user_id,)).fetchall()
+
+        rows = db.execute("""
+        SELECT direction, text, created_at
+        FROM messages
+        WHERE user_id=?
+        ORDER BY id ASC
+        """, (user_id,)).fetchall()
+
         if not rows:
-            await query.message.reply_text("برای این کاربر چتی ذخیره نشده.")
+
+            await query.message.reply_text(
+                "برای این کاربر چتی ذخیره نشده."
+            )
+
             return
+
         filename = f"chat_{user_id}.txt"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(f"Backup for user {user_id}\n")
-            f.write("=" * 50 + "\n\n")
+
+        with open(
+            filename,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            f.write(
+                f"Backup for user {user_id}\n"
+            )
+
+            f.write(
+                "=" * 50 + "\n\n"
+            )
+
             for direction, text, created_at in rows:
-                sender = "USER" if direction == "user" else "ADMIN"
-                f.write(f"[{created_at}] {sender}:\n{text}\n\n")
+
+                sender = (
+                    "USER"
+                    if direction == "user"
+                    else "ADMIN"
+                )
+
+                f.write(
+                    f"[{created_at}] {sender}:\n"
+                    f"{text}\n\n"
+                )
+
         try:
-            with open(filename, "rb") as file:
-                await context.bot.send_document(chat_id=ADMIN_USER_ID, document=file, caption=f"بکاپ چت کاربر {user_id}")
+
+            with open(
+                filename,
+                "rb"
+            ) as file:
+
+                await context.bot.send_document(
+                    chat_id=ADMIN_USER_ID,
+                    document=file,
+                    caption=f"بکاپ چت کاربر {user_id}"
+                )
+
         finally:
+
             try:
                 os.remove(filename)
             except Exception:
                 pass
 
-async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    start_time = time.perf_counter()
-    sent_message = await update.message.reply_text("محاسبه پینگ...")
-    end_time = time.perf_counter()
-    ping_ms = (end_time - start_time) * 1000
-    await sent_message.delete()
-    await update.message.reply_text(f"پینگ: <code>{ping_ms:.2f}ms</code>", parse_mode=ParseMode.HTML)
-
-async def cpu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    cpu_percent = psutil.cpu_percent(interval=1)
-    cpu_count = psutil.cpu_count()
-    try:
-        cpu_freq = psutil.cpu_freq()
-        freq_text = f"{cpu_freq.current:.0f}MHz" if cpu_freq else "نامشخص"
-    except:
-        freq_text = "نامشخص"
-    memory = psutil.virtual_memory()
-    memory_percent = memory.percent
-    disk = psutil.disk_usage('/')
-    disk_percent = disk.percent
-    boot_time = datetime.fromtimestamp(psutil.boot_time())
-    uptime = datetime.now() - boot_time
-    uptime_hours = uptime.total_seconds() / 3600
-    text = f"وضعیت سرور\n\nCPU: <code>{cpu_percent}%</code>\nهسته‌ها: <code>{cpu_count}</code>\nفرکانس: <code>{freq_text}</code>\n\nRAM: <code>{memory_percent}%</code>\nدیسک: <code>{disk_percent}%</code>\n\nآپتایم: <code>{uptime_hours:.1f} ساعت</code>"
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-async def log_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    if not log_buffer:
-        await update.message.reply_text("لاگی ثبت نشده.")
-        return
-    lines = list(log_buffer)[-10:]
-    log_text = "\n".join(lines)
-    await update.message.reply_text(f"```\n{log_text}\n```", parse_mode=ParseMode.MARKDOWN_V2)
-
-async def remote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    if not update.message.reply_to_message:
-        await update.message.reply_text("روی پیام حاوی کد ریپلای کن و /remote بزن.")
-        return
-    replied = update.message.reply_to_message
-    code = replied.text or ""
-    if not code:
-        await update.message.reply_text("پیام ریپلای شده متن ندارد.")
-        return
-    code = code.strip()
-    if code.startswith("```"):
-        code = re.sub(r"^```[a-zA-Z]*\n?", "", code)
-        code = re.sub(r"\n?```$", "", code)
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            exec_globals = {
-                'bot': context.bot,
-                'update': update,
-                'context': context,
-                'db': db,
-                'ADMIN_USER_ID': ADMIN_USER_ID,
-                'psutil': psutil,
-                'time': time,
-                'datetime': datetime,
-                'asyncio': asyncio,
-                'os': os,
-                'html': html,
-                're': re,
-                'logger': logger,
-                'log_buffer': log_buffer,
-            }
-            start_time = time.perf_counter()
-            exec(code, exec_globals)
-            end_time = time.perf_counter()
-        output = stdout.getvalue()
-        error_output = stderr.getvalue()
-        execution_time = (end_time - start_time) * 1000
-        if output:
-            result_text = f"خروجی:\n```\n{output[:3000]}\n```\nزمان اجرا: {execution_time:.2f}ms"
-        elif error_output:
-            result_text = f"خطا:\n```\n{error_output[:3000]}\n```"
-        else:
-            result_text = f"کد اجرا شد.\nزمان اجرا: {execution_time:.2f}ms"
-    except Exception as e:
-        error_details = traceback.format_exc()
-        result_text = f"خطا در اجرا:\n```\n{str(e)}\n\n{error_details[:2000]}\n```"
-    await update.message.reply_text(result_text)
-
-async def remote_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    if update.message.document:
-        document = update.message.document
-        file = await context.bot.get_file(document.file_id)
-        file_bytes = await file.download_as_bytearray()
-        code = file_bytes.decode('utf-8')
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                exec_globals = {
-                    'bot': context.bot,
-                    'update': update,
-                    'context': context,
-                    'db': db,
-                    'ADMIN_USER_ID': ADMIN_USER_ID,
-                    'psutil': psutil,
-                    'time': time,
-                    'datetime': datetime,
-                    'asyncio': asyncio,
-                    'os': os,
-                    'html': html,
-                    're': re,
-                }
-                exec(code, exec_globals)
-            output = stdout.getvalue()
-            if output:
-                result_text = f"خروجی:\n```\n{output[:3000]}\n```"
-            else:
-                result_text = "فایل اجرا شد."
-        except Exception as e:
-            result_text = f"خطا:\n```\n{str(e)}\n```"
-        await update.message.reply_text(result_text)
 
 def admin_panel_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("کاربران مسدود شده", callback_data="panel:blocked")],
-        [InlineKeyboardButton("ارسال همگانی", callback_data="panel:broadcast")],
-        [InlineKeyboardButton("لیست کاربران", callback_data="panel:users")],
-        [InlineKeyboardButton("پینگ", callback_data="panel:ping")],
-        [InlineKeyboardButton("CPU", callback_data="panel:cpu")],
-        [InlineKeyboardButton("لاگ", callback_data="panel:log")],
-        [InlineKeyboardButton("اجرای کد", callback_data="panel:remote")],
+        [
+            InlineKeyboardButton(
+                "لیست کاربران",
+                callback_data="panel:users"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "لیست مسدود شده",
+                callback_data="panel:blocked"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "ارسال همگانی",
+                callback_data="panel:broadcast"
+            )
+        ]
     ])
 
-async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def admin_help(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     if update.effective_user.id != ADMIN_USER_ID:
         return
-    await update.message.reply_text("پنل مدیریت\n\nیکی از گزینه‌ها را انتخاب کنید:", parse_mode=ParseMode.HTML, reply_markup=admin_panel_keyboard())
 
-async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "پنل مدیریت\n\n"
+        "یکی از گزینه‌ها را انتخاب کنید:",
+        reply_markup=admin_panel_keyboard()
+    )
+
+
+async def panel_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     query = update.callback_query
-    if query.from_user.id != ADMIN_USER_ID:
-        await query.answer("دسترسی ندارید.", show_alert=True)
-        return
-    await query.answer()
-    action = query.data.split(":", 1)[1]
-    if action == "blocked":
-        rows = db.execute("SELECT user_id, blocked_at FROM blocked_users ORDER BY blocked_at DESC").fetchall()
-        if not rows:
-            await query.message.reply_text("هیچ کاربری بلاک نیست.")
-            return
-        text = "کاربران مسدود شده\n\n"
-        for user_id, blocked_at in rows:
-            text += f"{user_id}\n{blocked_at}\n\n"
-        await query.message.reply_text(text, parse_mode=ParseMode.HTML)
-    elif action == "users":
-        row = db.execute("SELECT COUNT(*) FROM users").fetchone()
-        count = row[0]
-        await query.message.reply_text(f"تعداد کاربران ثبت‌شده: <b>{count}</b>", parse_mode=ParseMode.HTML)
-    elif action == "broadcast":
-        broadcast_mode.add(ADMIN_USER_ID)
-        await query.message.reply_text("متن پیام همگانی را ارسال کنید.\n\nبرای لغو، /cancel را بفرستید.")
-    elif action == "ping":
-        start_time = time.perf_counter()
-        sent_message = await query.message.reply_text("محاسبه پینگ...")
-        end_time = time.perf_counter()
-        ping_ms = (end_time - start_time) * 1000
-        await sent_message.delete()
-        await query.message.reply_text(f"پینگ: <code>{ping_ms:.2f}ms</code>", parse_mode=ParseMode.HTML)
-    elif action == "cpu":
-        cpu_percent = psutil.cpu_percent(interval=1)
-        cpu_count = psutil.cpu_count()
-        try:
-            cpu_freq = psutil.cpu_freq()
-            freq_text = f"{cpu_freq.current:.0f}MHz" if cpu_freq else "نامشخص"
-        except:
-            freq_text = "نامشخص"
-        memory = psutil.virtual_memory()
-        memory_percent = memory.percent
-        disk = psutil.disk_usage('/')
-        disk_percent = disk.percent
-        boot_time = datetime.fromtimestamp(psutil.boot_time())
-        uptime = datetime.now() - boot_time
-        uptime_hours = uptime.total_seconds() / 3600
-        text = f"وضعیت سرور\n\nCPU: <code>{cpu_percent}%</code>\nهسته‌ها: <code>{cpu_count}</code>\nفرکانس: <code>{freq_text}</code>\n\nRAM: <code>{memory_percent}%</code>\nدیسک: <code>{disk_percent}%</code>\n\nآپتایم: <code>{uptime_hours:.1f} ساعت</code>"
-        await query.message.reply_text(text, parse_mode=ParseMode.HTML)
-    elif action == "log":
-        if not log_buffer:
-            await query.message.reply_text("لاگی ثبت نشده.")
-            return
-        lines = list(log_buffer)[-10:]
-        log_text = "\n".join(lines)
-        await query.message.reply_text(f"```\n{log_text}\n```", parse_mode=ParseMode.MARKDOWN_V2)
-    elif action == "remote":
-        await query.message.reply_text("کد پایتون را بفرست و روی آن /remote را ریپلای کن.")
 
-async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
+    if query.from_user.id != ADMIN_USER_ID:
+
+        await query.answer(
+            "دسترسی ندارید.",
+            show_alert=True
+        )
+
         return
-    text = update.message.text or ""
+
+    await query.answer()
+
+    action = query.data.split(
+        ":",
+        1
+    )[1]
+
+    if action == "blocked":
+
+        rows = db.execute("""
+        SELECT user_id, blocked_at
+        FROM blocked_users
+        ORDER BY blocked_at DESC
+        """).fetchall()
+
+        if not rows:
+
+            await query.message.reply_text(
+                "هیچ کاربری بلاک نیست."
+            )
+
+            return
+
+        text = "کاربران مسدود شده\n\n"
+
+        for user_id, blocked_at in rows:
+
+            text += (
+                f"{user_id}\n"
+                f"{blocked_at}\n\n"
+            )
+
+        await query.message.reply_text(text)
+
+    elif action == "users":
+
+        row = db.execute(
+            "SELECT COUNT(*) FROM users"
+        ).fetchone()
+
+        count = row[0]
+
+        await query.message.reply_text(
+            f"تعداد کاربران ثبت‌شده: {count}"
+        )
+
+    elif action == "broadcast":
+
+        broadcast_mode.add(
+            ADMIN_USER_ID
+        )
+
+        await query.message.reply_text(
+            "متن پیام همگانی را ارسال کنید.\n\n"
+            "برای لغو، /cancel را بفرستید."
+        )
+
+
+async def send_admin_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    target_user_id: int
+):
+    """
+    هر نوع پیام ادمین را به کاربر ارسال می‌کند.
+    """
+
+    message = update.message
+
+    # پیام متنی
+    if message.text:
+
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=message.text,
+            reply_markup=user_reply_keyboard()
+        )
+
+        save_message(
+            target_user_id,
+            "admin",
+            message.text
+        )
+
+        return
+
+    # مدیا
+    await context.bot.copy_message(
+        chat_id=target_user_id,
+        from_chat_id=message.chat_id,
+        message_id=message.message_id,
+        reply_markup=user_reply_keyboard()
+    )
+
+    save_message(
+        target_user_id,
+        "admin",
+        get_message_text(message)
+    )
+
+
+async def handle_admin_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    user = update.effective_user
+    message = update.message
+
+    if not user or not message:
+        return
+
+    if user.id != ADMIN_USER_ID:
+        return
+
+    if update.effective_chat.type != "private":
+        return
+
+    text = message.text or ""
+
+    if text == "/button":
+
+        button_states[ADMIN_USER_ID] = {
+            "step": "text"
+        }
+
+        await message.reply_text(
+            "متن بنر را ارسال کنید."
+        )
+
+        return
+
+    if ADMIN_USER_ID in button_states:
+
+        await handle_button_flow(
+            update,
+            context
+        )
+
+        return
+
     if text.lower() == "help":
-        await admin_help(update, context)
+
+        await admin_help(
+            update,
+            context
+        )
+
         return
+
     if text == "/cancel":
-        broadcast_mode.discard(ADMIN_USER_ID)
-        reply_targets.pop(ADMIN_USER_ID, None)
-        await update.message.reply_text("لغو شد.")
+
+        broadcast_mode.discard(
+            ADMIN_USER_ID
+        )
+
+        reply_targets.pop(
+            ADMIN_USER_ID,
+            None
+        )
+
+        button_states.pop(
+            ADMIN_USER_ID,
+            None
+        )
+
+        pending_banner.pop(
+            ADMIN_USER_ID,
+            None
+        )
+
+        await message.reply_text(
+            "لغو شد."
+        )
+
         return
+
+    # پاسخ به کاربر با متن یا مدیا
+    if ADMIN_USER_ID in reply_targets:
+
+        target_user_id = reply_targets[
+            ADMIN_USER_ID
+        ]
+
+        if is_blocked(target_user_id):
+
+            await message.reply_text(
+                "این کاربر بلاک است."
+            )
+
+            reply_targets.pop(
+                ADMIN_USER_ID,
+                None
+            )
+
+            return
+
+        try:
+
+            await send_admin_reply(
+                update,
+                context,
+                target_user_id
+            )
+
+            await message.reply_text(
+                "پاسخ ارسال شد."
+            )
+
+            reply_targets.pop(
+                ADMIN_USER_ID,
+                None
+            )
+
+        except Exception as e:
+
+            logger.exception(
+                "Reply failed: %s",
+                e
+            )
+
+            await message.reply_text(
+                "ارسال پاسخ انجام نشد."
+            )
+
+        return
+
+    # ارسال همگانی فقط برای متن
     if ADMIN_USER_ID in broadcast_mode:
-        broadcast_mode.discard(ADMIN_USER_ID)
-        users = db.execute("SELECT user_id FROM users").fetchall()
+
+        broadcast_mode.discard(
+            ADMIN_USER_ID
+        )
+
+        if not message.text:
+
+            await message.reply_text(
+                "ارسال همگانی فعلاً فقط برای پیام متنی فعال است."
+            )
+
+            return
+
+        users = db.execute(
+            "SELECT user_id FROM users"
+        ).fetchall()
+
         sent = 0
+
         for (user_id,) in users:
+
             if is_blocked(user_id):
                 continue
-            try:
-                await context.bot.send_message(chat_id=user_id, text=text)
-                sent += 1
-            except Exception as e:
-                logger.warning("Broadcast failed for %s: %s", user_id, e)
-        await update.message.reply_text(f"ارسال همگانی انجام شد.\nتعداد ارسال موفق: {sent}")
-        return
-    if ADMIN_USER_ID in reply_targets:
-        target_user_id = reply_targets[ADMIN_USER_ID]
-        if is_blocked(target_user_id):
-            await update.message.reply_text("این کاربر بلاک است.")
-            reply_targets.pop(ADMIN_USER_ID, None)
-            return
-        try:
-            await context.bot.send_message(chat_id=target_user_id, text=f"پاسخ شما:\n\n{html.escape(text)}", parse_mode=ParseMode.HTML, reply_markup=user_reply_keyboard())
-            save_message(target_user_id, "admin", text)
-            await update.message.reply_text("پاسخ ارسال شد.")
-            reply_targets.pop(ADMIN_USER_ID, None)
-        except Exception as e:
-            logger.exception("Reply failed: %s", e)
-            await update.message.reply_text("ارسال پاسخ انجام نشد.")
-        return
-    await update.message.reply_text("برای مدیریت، help را ارسال کنید.")
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.exception("Unhandled error:", exc_info=context.error)
+            try:
+
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message.text
+                )
+
+                sent += 1
+
+            except Exception as e:
+
+                logger.warning(
+                    "Broadcast failed for %s: %s",
+                    user_id,
+                    e
+                )
+
+        await message.reply_text(
+            f"ارسال همگانی انجام شد.\n"
+            f"تعداد ارسال موفق: {sent}"
+        )
+
+        return
+
+    await message.reply_text(
+        "برای مدیریت، help را ارسال کنید."
+    )
+
+
+async def handle_button_flow(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    user_id = update.effective_user.id
+    message = update.message
+
+    if user_id not in button_states:
+
+        button_states[user_id] = {
+            "step": "text"
+        }
+
+        await message.reply_text(
+            "متن بنر را ارسال کنید."
+        )
+
+        return
+
+    state = button_states[user_id]
+
+    if state["step"] == "text":
+
+        state["text"] = message.text
+        state["step"] = "buttons"
+        state["buttons"] = []
+
+        await message.reply_text(
+            "دکمه‌ها را ارسال کنید.\n\n"
+            "فرمت:\n"
+            "متن دکمه - لینک\n\n"
+            "برای دکمه کنار هم با | جدا کنید:\n"
+            "متن1 - لینک1 | متن2 - لینک2\n\n"
+            "برای پایان end بفرستید."
+        )
+
+    elif state["step"] == "buttons":
+
+        if not message.text:
+            await message.reply_text(
+                "لطفاً متن دکمه‌ها را ارسال کنید."
+            )
+            return
+
+        if message.text.lower() == "end":
+
+            pending_banner[user_id] = {
+                "text": state["text"],
+                "buttons": state["buttons"]
+            }
+
+            del button_states[user_id]
+
+            await message.reply_text(
+                "بنر آماده شد."
+            )
+
+            await show_channels(
+                update,
+                context
+            )
+
+            return
+
+        parts = message.text.split("|")
+        row = []
+
+        for part in parts:
+
+            part = part.strip()
+
+            if " - " in part:
+
+                btn_text, btn_url = part.split(
+                    " - ",
+                    1
+                )
+
+            elif "-" in part:
+
+                btn_text, btn_url = part.split(
+                    "-",
+                    1
+                )
+
+            else:
+                continue
+
+            row.append(
+                InlineKeyboardButton(
+                    btn_text.strip(),
+                    url=btn_url.strip()
+                )
+            )
+
+        if row:
+
+            state["buttons"].append(row)
+
+            await message.reply_text(
+                f"دکمه اضافه شد. ({len(row)} دکمه)\n\n"
+                "ادامه بده یا end بزن."
+            )
+
+
+async def show_channels(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    rows = get_channels()
+
+    if not rows:
+
+        await update.message.reply_text(
+            "ربات در هیچ کانالی ادمین نیست.\n\n"
+            "ربات را در کانال مورد نظر ادمین کنید.\n"
+            "سپس /addchannel [chat_id] [title] را بزنید."
+        )
+
+        return
+
+    keyboard = []
+
+    for chat_id, title in rows:
+
+        keyboard.append([
+            InlineKeyboardButton(
+                title,
+                callback_data=f"send_banner:{chat_id}"
+            )
+        ])
+
+    await update.message.reply_text(
+        "کانال‌هایی که ربات ادمین است:\n\n"
+        "روی کانال بزنید تا بنر ارسال شود.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def add_channel_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    if not context.args:
+
+        await update.message.reply_text(
+            "استفاده: /addchannel [chat_id] [title]"
+        )
+
+        return
+
+    try:
+
+        chat_id = int(
+            context.args[0]
+        )
+
+        title = (
+            " ".join(context.args[1:])
+            if len(context.args) > 1
+            else "کانال"
+        )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "chat_id نامعتبر است."
+        )
+
+        return
+
+    save_channel(
+        chat_id,
+        title
+    )
+
+    await update.message.reply_text(
+        f"کانال {title} با آیدی {chat_id} ذخیره شد."
+    )
+
+
+async def send_banner_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+
+    await query.answer()
+
+    if query.from_user.id != ADMIN_USER_ID:
+        return
+
+    try:
+
+        chat_id = int(
+            query.data.split(":")[1]
+        )
+
+    except Exception:
+        return
+
+    banner = pending_banner.get(
+        ADMIN_USER_ID
+    )
+
+    if not banner:
+
+        await query.message.reply_text(
+            "بنری یافت نشد. دوباره /button بزنید."
+        )
+
+        return
+
+    keyboard = []
+
+    for row in banner["buttons"]:
+        keyboard.append(row)
+
+    try:
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=banner["text"],
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
+        )
+
+        await query.message.reply_text(
+            "بنر ارسال شد."
+        )
+
+        del pending_banner[
+            ADMIN_USER_ID
+        ]
+
+    except Exception as e:
+
+        await query.message.reply_text(
+            f"خطا در ارسال بنر: {str(e)}"
+        )
+
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    logger.exception(
+        "Unhandled error:",
+        exc_info=context.error
+    )
+
 
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
 
-    def log_message(self, format, *args):
+    def do_GET(self):
+
+        self.send_response(200)
+
+        self.send_header(
+            "Content-Type",
+            "text/plain"
+        )
+
+        self.end_headers()
+
+        self.wfile.write(
+            b"OK"
+        )
+
+    def log_message(
+        self,
+        format,
+        *args
+    ):
         return
 
+
 def start_health_server():
-    port = int(os.environ.get("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000"
+        )
+    )
+
+    server = HTTPServer(
+        ("0.0.0.0", port),
+        HealthHandler
+    )
+
     server.serve_forever()
 
-def main():
-    port = int(os.environ.get("PORT", "10000"))
 
-    health_thread = threading.Thread(target=start_health_server, daemon=True)
+def main():
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000"
+        )
+    )
+
+    health_thread = threading.Thread(
+        target=start_health_server,
+        daemon=True
+    )
+
     health_thread.start()
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("ping", ping_command))
-    application.add_handler(CommandHandler("cpu", cpu_command))
-    application.add_handler(CommandHandler("log", log_command))
-    application.add_handler(CommandHandler("remote", remote_command))
+    application.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
+    )
 
-    application.add_handler(CallbackQueryHandler(user_button, pattern=r"^(user_send|user_reply|user_help)$"))
-    application.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(reply|block|unblock|deletechat|backup):"))
-    application.add_handler(CallbackQueryHandler(panel_callback, pattern=r"^panel:"))
+    application.add_handler(
+        CommandHandler(
+            "addchannel",
+            add_channel_command
+        )
+    )
 
-    application.add_handler(MessageHandler(filters.Document.FileExtension("py") & filters.User(user_id=ADMIN_USER_ID), remote_file_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(user_id=ADMIN_USER_ID), handle_admin_message))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.User(user_id=ADMIN_USER_ID), handle_user_message))
+    application.add_handler(
+        CallbackQueryHandler(
+            user_button,
+            pattern=r"^(user_send|user_reply|user_help)$"
+        )
+    )
 
-    application.add_error_handler(error_handler)
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_callback,
+            pattern=r"^(reply|block|unblock|deletechat|backup):"
+        )
+    )
 
-    print(f"Bot is running on port {port}...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.add_handler(
+        CallbackQueryHandler(
+            panel_callback,
+            pattern=r"^panel:"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            send_banner_callback,
+            pattern=r"^send_banner:"
+        )
+    )
+
+    application.add_handler(
+        ChatMemberHandler(
+            my_chat_member_handler,
+            ChatMemberHandler.MY_CHAT_MEMBER
+        )
+    )
+
+    # تمام پیام‌های ادمین:
+    # متن، عکس، ویدئو، GIF، استیکر، فایل، ویس، صدا و...
+    application.add_handler(
+        MessageHandler(
+            filters.ALL
+            & ~filters.COMMAND
+            & filters.User(
+                user_id=ADMIN_USER_ID
+            ),
+            handle_admin_message
+        )
+    )
+
+    # تمام پیام‌های کاربران
+    application.add_handler(
+        MessageHandler(
+            filters.ALL
+            & ~filters.COMMAND
+            & ~filters.User(
+                user_id=ADMIN_USER_ID
+            ),
+            handle_user_message
+        )
+    )
+
+    application.add_error_handler(
+        error_handler
+    )
+
+    print(
+        f"Bot is running on port {port}..."
+    )
+
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES
+    )
+
 
 if __name__ == "__main__":
     main()
