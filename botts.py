@@ -422,9 +422,7 @@ async def start(
         return
 
     await update.message.reply_text(
-        "سلام 👋\n\n"
-        "پیامت رو ارسال کن تا برای مدیریت ارسال بشه.\n\n"
-        "متن، عکس، ویدئو، GIF، استیکر، فایل، ویس و صدا قابل ارسال است.",
+        "سلام! پیامتون رو بفرستید، در اسرع وقت پاسخ داده می‌شه.",
         reply_markup=user_keyboard()
     )
 
@@ -687,7 +685,7 @@ async def admin_callback(
 
         await query.message.reply_text(
             "پاسخ به کاربر را ارسال کنید.\n"
-            "متن، عکس، ویدئو، GIF، استیکر، فایل، ویس و صدا قابل ارسال است."
+            "متن، عکس، ویدئو، GIF، استیکر، فایل، ویس و صدا قا��ل ارسال است."
         )
 
     elif action == "block":
