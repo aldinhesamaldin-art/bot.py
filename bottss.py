@@ -422,7 +422,7 @@ async def start(
         return
 
     await update.message.reply_text(
-        "سلام! پیامتون رو بفرستید، در اسرع وقت پاسخ داده می‌شه.",
+        "🙂سلام!👋پیامتون رو بفرستید، در اسرع وقت پاسخ داده می‌شه.",
         reply_markup=user_keyboard()
     )
 
@@ -537,7 +537,7 @@ async def handle_user_message(
     if text and contains_profanity(text):
 
         await message.reply_text(
-            "پیام شما به دلیل توهین ارسال نشد."
+            "😡پیام شما به دلیل توهین ارسال نشد."
         )
 
         return
@@ -557,7 +557,7 @@ async def handle_user_message(
         )
 
         await message.reply_text(
-            "پیام شما دریافت شد. منتظر پاسخ باشید."
+            "🙂پیام شما دریافت شد. منتظر پاسخ باشید."
         )
 
     except Exception as e:
@@ -568,7 +568,7 @@ async def handle_user_message(
         )
 
         await message.reply_text(
-            "خطا در ارسال پیام. لطفاً دوباره تلاش کنید."
+            "🙂خطا در ارسال پیام. لطفاً دوباره تلاش کنید."
         )
 
 
@@ -595,10 +595,7 @@ async def user_button(
             "waiting_for_user_message"
         ] = True
 
-        await query.message.reply_text(
-            "پیامت رو ارسال کن.\n"
-            "متن، عکس، ویدئو، GIF، استیکر، فایل، ویس و صدا قابل ارسال است."
-        )
+        await query.message.reply_text("پیامت رو ارسال کن 😉")
 
     elif query.data == "user_reply":
 
@@ -607,14 +604,14 @@ async def user_button(
         ] = True
 
         await query.message.reply_text(
-            "پاسخت رو ارسال کن."
+            "🙂پاسخت رو ارسال کن."
         )
 
     elif query.data == "user_help":
 
         await query.message.reply_text(
             "راهنما\n\n"
-            "پیامت رو ارسال کن تا برای مدیریت ارسال بشه."
+            "🙂پیامت رو ارسال کن تا برای مدیریت ارسال بشه."
         )
 
 
@@ -700,7 +697,7 @@ async def admin_callback(
 
             await context.bot.send_message(
                 chat_id=user_id,
-                text="شما بلاک شدید."
+                text="😡شما بلاک شدید."
             )
 
         except Exception:
